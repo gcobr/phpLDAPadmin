@@ -1,0 +1,28 @@
+## c=AU backend database.
+##
+## The checked-in test fixtures (tests/server/openldap) don't include a
+## `bases` entry for c=AU even though tests/server/openldap/data/01-au.ldif
+## adds a c=AU root entry and GetBaseDNTest expects it as one of the
+## server's base DNs. It's assumed to be provided by the environment that
+## seeds the test server (see git commit e399b73, which deprecated using
+## osixia/openldap in favor of tooling that isn't part of this repo). This
+## file recreates that missing backend so the test data can load as-is.
+##
+## Loaded before tests/server/openldap/bases/*.ldif so it takes database
+## index {1} (our custom cn=config has no vendor-provided default
+## database ahead of it). tests/server/openldap/schema/modify/00-mapsize.ldif
+## and the 40-* overlay files assume indices {3}-{7} / {4}mdb, one higher
+## than our real sequence (au={1}, bases={2}-{6}) - see entrypoint.sh,
+## which shifts those indices down by one on copy.
+dn: olcDatabase=mdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDbDirectory: /var/lib/openldap/data
+olcDatabase: mdb
+olcLastMod: TRUE
+olcMonitoring: TRUE
+olcSuffix: c=AU
+olcAccess: to dn.base="" by dn="cn=admin,dc=Test" write by * read
+olcAccess: to * by dn="cn=admin,dc=Test" write by dn="cn=admin,c=AU" write by * read
+olcRootDN: cn=admin,c=AU
+olcRootPW: {SSHA}jTir88DPr8nLdxS0DTmR5LrhWtlKfKKB

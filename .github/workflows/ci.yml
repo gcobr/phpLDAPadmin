@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run-tests: ${{ steps.decide.outputs.run }}
+      image-repo: ${{ steps.vars.outputs.repo }}
+      image-tag: ${{ steps.vars.outputs.tag }}
+      is-fork-pr: ${{ steps.vars.outputs.is-fork-pr }}
     steps:
       - name: Decide whether to run
         id: decide
@@ -45,8 +48,144 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-  test:
-    name: Run tests
+      # GHCR image names must be lowercase, and tags can't contain slashes
+      # (e.g. feature/foo) or other characters outside [a-zA-Z0-9._-].
+      - name: Compute image repo/tag
+        id: vars
+        run: |
+          branch="${{ github.head_ref || github.ref_name }}"
+          tag=$(echo "$branch" | tr -c 'a-zA-Z0-9._-' '-' | cut -c1-128)
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+
+          # A PR from a fork runs with a read-only GITHUB_TOKEN scoped to
+          # this (base) repo, regardless of the permissions: block below -
+          # it can't push to ghcr.io no matter what. Detected separately
+          # from run-tests since even a fork PR's tests should still run,
+          # just via a local build instead of push/pull through GHCR.
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+            echo "is-fork-pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-fork-pr=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-openldap-image:
+    name: Build OpenLDAP test image
+    needs: gate
+    if: needs.gate.outputs.run-tests == 'true' && needs.gate.outputs.is-fork-pr == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/openldap/Dockerfile
+          push: true
+          tags: ghcr.io/${{ needs.gate.outputs.image-repo }}/openldap:${{ needs.gate.outputs.image-tag }}
+          cache-from: type=gha,scope=openldap
+          cache-to: type=gha,mode=max,scope=openldap
+
+  build-php-test-image:
+    name: Build PHP test-runner image
+    needs: gate
+    if: needs.gate.outputs.run-tests == 'true' && needs.gate.outputs.is-fork-pr == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/php-test/Dockerfile
+          push: true
+          tags: ghcr.io/${{ needs.gate.outputs.image-repo }}/php-test:${{ needs.gate.outputs.image-tag }}
+          cache-from: type=gha,scope=php-test
+          cache-to: type=gha,mode=max,scope=php-test
+
+  integration-tests:
+    name: Run integration tests
+    needs: [gate, build-openldap-image, build-php-test-image]
+    if: needs.gate.outputs.run-tests == 'true' && needs.gate.outputs.is-fork-pr == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/${{ needs.gate.outputs.image-repo }}/php-test:${{ needs.gate.outputs.image-tag }}
+    services:
+      openldap:
+        image: ghcr.io/${{ needs.gate.outputs.image-repo }}/openldap:${{ needs.gate.outputs.image-tag }}
+    env:
+      APP_ENV: testing
+      # tests/server/openldap's fixtures hash the shared admin/test password
+      # as "password" (verified against the SSHA hash in bases/*.ldif),
+      # which doesn't match .env.testing's LDAP_PASSWORD=test.
+      LDAP_PASSWORD: password
+      APP_KEY: base64:xaWmzPPjGLj3ymm3OGRZVEEaJ2RSIZLpvUG3i/eceAA=
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Run test suite
+        run: php artisan test
+
+  # Fork PRs can't push to (or pull from) ghcr.io - their GITHUB_TOKEN is
+  # read-only for this (base) repo no matter what permissions: requests.
+  # Rather than skip integration coverage for external contributions, build
+  # the images locally in this job and run the same suite via the same
+  # script a contributor would use on their own machine.
+  integration-tests-fork-pr:
+    name: Run integration tests (fork PR, local build)
+    needs: gate
+    if: needs.gate.outputs.run-tests == 'true' && needs.gate.outputs.is-fork-pr == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run integration tests
+        run: tests/run-integration-tests.sh
+
+  # Fast, LDAP-independent feedback that doesn't wait on the Docker image
+  # builds; integration-tests is the authoritative full run (Unit +
+  # Feature) against a real, seeded OpenLDAP server.
+  unit-tests:
+    name: Run unit tests
     needs: gate
     if: needs.gate.outputs.run-tests == 'true'
     runs-on: ubuntu-latest
@@ -83,8 +222,5 @@ jobs:
       - name: Generate application key
         run: php artisan key:generate
 
-      # Feature tests require a live, seeded OpenLDAP server (see
-      # tests/server/openldap) which isn't yet automated in CI, so only the
-      # LDAP-independent Unit suite runs here for now.
       - name: Run Unit test suite
         run: vendor/bin/phpunit --testsuite Unit

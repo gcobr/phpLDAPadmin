@@ -1,0 +1,43 @@
+## Minimal cn=config bootstrap for a from-scratch OpenLDAP install.
+##
+## The module container is deliberately named z-module (not the usual
+## "module") so it lands at cn=z-module{0},cn=config, matching the DN that
+## tests/server/openldap/schema/modify/*.ldif already expect - no rewriting
+## needed. Only back_mdb is loaded here; the remaining modules
+## (memberof/refint/ppolicy/sssvlv/argon2) are loaded by those same
+## schema/modify files, exactly as originally intended.
+##
+## misc.schema is included alongside the usual core/cosine/inetorgperson/nis
+## set because it defines mailHost/mailRoutingAddress/mailLocalAddress
+## (inetLocalMailRecipient, used by the Flintstones/Simpsons data) and
+## nisMailAlias (used by 04-z_labeleduri.ldif) - neither of which the
+## smaller schema set includes.
+dn: cn=config
+objectClass: olcGlobal
+cn: config
+
+dn: cn=z-module,cn=config
+objectClass: olcModuleList
+cn: z-module
+olcModulePath: /usr/lib/openldap
+olcModuleLoad: back_mdb.so
+
+dn: cn=schema,cn=config
+objectClass: olcSchemaConfig
+cn: schema
+
+include: file:///etc/openldap/schema/core.ldif
+include: file:///etc/openldap/schema/cosine.ldif
+include: file:///etc/openldap/schema/inetorgperson.ldif
+include: file:///etc/openldap/schema/nis.ldif
+include: file:///etc/openldap/schema/misc.ldif
+
+dn: olcDatabase=frontend,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcFrontendConfig
+olcDatabase: frontend
+
+dn: olcDatabase=config,cn=config
+objectClass: olcDatabaseConfig
+olcDatabase: config
+olcAccess: to * by dn.exact="gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth" manage by * break
