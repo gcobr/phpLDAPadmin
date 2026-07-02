@@ -120,8 +120,12 @@ final class Password extends Attribute implements MD5Update,ForceSingleValue,NoA
 	{
 		$pw = parent::render_item_new($dotkey);
 
+		// Unlike render_item_old(), a new clear text value is flagged with
+		// a {*clear*} prefix - it's about to overwrite whatever is stored
+		// now, so (unlike the old value, which is just informational) it's
+		// worth warning that it'll be saved unhashed.
 		return $pw
-			? (((($x=$this->hash($pw)) && ($x->id() !== '*CLEAR*')) ? sprintf('{%s}',$x->shortid()) : '')
+			? (((($x=$this->hash($pw)) && ($x->id() === '*CLEAR*')) ? sprintf('{%s}',strtolower($x->id())) : '')
 				.self::obfuscate)
 			: NULL;
 	}
