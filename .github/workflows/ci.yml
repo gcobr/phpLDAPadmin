@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'feature/**'
+      - 'fix/**'
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # A push to a branch that already has an open pull request is fully covered
+  # by the pull_request-triggered run for that same commit, so we skip the
+  # push-triggered run here rather than running the suite twice.
+  gate:
+    name: Determine if tests should run
+    runs-on: ubuntu-latest
+    outputs:
+      run-tests: ${{ steps.decide.outputs.run }}
+    steps:
+      - name: Decide whether to run
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          open_prs=$(gh pr list --repo "${{ github.repository }}" --head "${{ github.ref_name }}" --state open --json number --jq 'length')
+          if [ "$open_prs" -gt 0 ]; then
+            echo "Skipping: '${{ github.ref_name }}' has an open pull request; that PR's workflow run covers this commit."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    name: Run tests
+    needs: gate
+    if: needs.gate.outputs.run-tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, ldap, iconv, fileinfo, openssl
+          coverage: none
+          tools: composer:v2
+
+      - name: Prepare environment file
+        run: cp .env.example .env
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Generate application key
+        run: php artisan key:generate
+
+      # Feature tests require a live, seeded OpenLDAP server (see
+      # tests/server/openldap) which isn't yet automated in CI, so only the
+      # LDAP-independent Unit suite runs here for now.
+      - name: Run Unit test suite
+        run: vendor/bin/phpunit --testsuite Unit
